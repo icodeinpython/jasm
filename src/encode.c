@@ -57,10 +57,10 @@ static int reg_size(const char *r) {
     if (r[len-1] == 'l') return 8;  // legacy low?
     if (r[len-1] == 'h') return 8;
     if (r[len-1] == 'b') return 8;
-    if (len == 2) return 16;
+    if (r[0] == 'r') return 64;
     if (r[len-1] == 'w') return 16;
     if (r[0] == 'e' || r[len-1] == 'd') return 32;
-    return 64; // default
+    return 16; // default
 }
 
 // -------------------- REX prefix --------------------
@@ -71,7 +71,6 @@ static void emit_rex(uint8_t **out, bool w, bool r, bool b, bool x) {
     if (x) rex |= 0x02;
     if (b) rex |= 0x01;
     *(*out)++ = rex;
-    printf("rex: %#x", rex);
 }
 
 
@@ -199,14 +198,12 @@ size_t encode_mov_reg_mem(uint8_t *out, Operand* dst, Operand* src) {
     bool needs_rex = rex_w || rex_b ||
         !strcmp(src->reg, "%sil") || !strcmp(src->reg, "%dil") || !strcmp(src->reg, "%bpl") || !strcmp(src->reg, "%spl");
 
-    printf("reg: %d, rm: %d\n", reg, rm);
 
     if (src_sz != 32 && src_sz != 64) {
         fprintf(stderr, "Invalid source size: %d\n", src_sz);
         return 0;
     }
 
-    printf("src_sz: %d\n", src_sz);
 
     if (src_sz == 32) {
         *out++ = 0x67;
