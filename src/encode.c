@@ -51,16 +51,14 @@ static int reg_size(const char *r) {
     if (r[0] == '%') r++;
     size_t len = strlen(r);
 
-    
-
     // 8-bit new low
     if (r[len-1] == 'l') return 8;  // legacy low?
     if (r[len-1] == 'h') return 8;
     if (r[len-1] == 'b') return 8;
-    if (r[0] == 'r') return 64;
     if (r[len-1] == 'w') return 16;
     if (r[0] == 'e' || r[len-1] == 'd') return 32;
-    return 16; // default
+    if (r[0] == 'r') return 64;
+    return 16; // else
 }
 
 // -------------------- REX prefix --------------------
@@ -252,12 +250,120 @@ size_t encode_mov_mem_reg(uint8_t *out, Operand* dst, Operand* src) {
     size_t size = 0;
     int sz = reg_size(dst->reg);
 
-    printf("reg: %s\n", dst->reg);
+    printf("reg_sz: %d\n", sz);
+
+    int mem_sz = reg_size(src->mem.base);
+
+    
+    int rm = reg_code(src->mem.base);
+    int reg = reg_code(dst->reg);
+
+    bool rex_w = (sz == 64);
+    bool rex_b = (rm & 8) != 0;
+    bool rex_r = (reg & 8) != 0;
 
 
+    bool needs_rex = rex_w || rex_b || rex_r ||
+        !strcmp(dst->reg, "%sil") || !strcmp(dst->reg, "%dil") || !strcmp(dst->reg, "%bpl") || !strcmp(dst->reg, "%spl");
 
+
+    if (mem_sz == 32) {
+        *out++ = 0x67;
+        size++;
+    }
+
+
+    switch (sz) {
+        case 8:
+            if (needs_rex) {emit_rex(&out, rex_w, rex_r, rex_b, 0); size++;}
+            *out++ = 0x8A;
+            if (reg > 7) reg -= 8;
+            if (rm > 7) rm -= 8;
+            *out++ = (reg << 3) | rm;
+            size += 2;
+            break;
+        case 16:
+            *out++ = 0x66;
+            /* FALLTHRU */
+        case 32:
+            if (needs_rex) {emit_rex(&out, rex_w, rex_r, rex_b, 0); size++;}
+            *out++ = 0x8B;
+            if (reg > 7) reg -= 8;
+            if (rm > 7) rm -= 8;
+            *out++ = (reg << 3) | rm;
+            size += 3;
+            break;
+        case 64:
+            if (needs_rex) {emit_rex(&out, rex_w, rex_r, rex_b, 0); size++;}
+            *out++ = 0x8B;
+            if (reg > 7) reg -= 8;
+            if (rm > 7) rm -= 8;
+            *out++ = (reg << 3) | rm;
+            size += 3;
+            break;
+    }
+
+    return size;
 }
 
+size_t encode_mov_mem_imm(uint8_t *out, Operand* dst, Operand* src) {
+    size_t size = 0;
+
+    int mem_reg_size = reg_size(dst->mem.base);
+    int mem_sz = dst->mem.size;
+
+    if (mem_sz == 0) {
+        fprintf(stderr, "mov imm, mem: size not specified\n");
+        return 0;
+    }
+
+    int rm = reg_code(dst->mem.base);
+
+    printf("mem base: %s\n", dst->mem.base);
+
+    bool rex_w = (mem_sz == 64);
+    bool rex_b = (rm & 8) != 0;
+
+    if (rm > 7) rm -= 8;
+
+
+    bool needs_rex = rex_w || rex_b;
+    if (mem_reg_size == 32) {
+        *out++ = 0x67;
+        size++;
+    }
+
+    switch (mem_sz) {
+        case 8:
+            if (needs_rex) {emit_rex(&out, rex_w, 0, rex_b, 0); size++;}
+            *out++ = 0xc6;
+            
+            *out++ = rm;
+            *out++ = src->imm;
+            size += 3;
+            break;
+        case 16:
+            *out++ = 0x66;
+            if (needs_rex) {emit_rex(&out, rex_w, 0, rex_b, 0); size++;}
+            *out++ = 0xc7;
+            *out++ = rm;
+            *((uint16_t*)out) = (uint16_t)src->imm;
+            out += 2;
+            size += 5;
+            break;
+        case 32:
+        case 64:
+            if (needs_rex) {emit_rex(&out, rex_w, 0, rex_b, 0); size++;}
+            *out++ = 0xc7;
+            *out++ = rm;
+            *((uint32_t*)out) = (uint32_t)src->imm;
+            out += 4;
+            size += 7;
+            break;
+        }
+
+    return size;
+}
 
 
 // -------------------- Strip suffix --------------------
@@ -285,10 +391,10 @@ size_t encode_instruction(uint8_t *out, Instruction *inst, Program *prog, size_t
             if (src->kind == OP_IMM && dst->kind == OP_REG) return encode_mov_imm_reg(out, dst, src);
             if (dst->kind == OP_MEM && src->kind == OP_REG) return encode_mov_reg_mem(out, dst, src);
             if (dst->kind == OP_REG && src->kind == OP_MEM) return encode_mov_mem_reg(out, dst, src);
-            // if (dst->kind == OP_MEM && src->kind == OP_IMM) return encode_mov_mem_imm(out, dst, src);
-        // }
-        // if (strcmp(opc, "add") == 0) {
-            // if (src->kind == OP_REG && dst->kind == OP_REG) return encode_add_reg_reg(out, dst, src);
+            if (dst->kind == OP_MEM && src->kind == OP_IMM) return encode_mov_mem_imm(out, dst, src);
+        }
+        if (strcmp(opc, "add") == 0) {
+            if (src->kind == OP_REG && dst->kind == OP_REG) return encode_add_reg_reg(out, dst, src);
             // if (src->kind == OP_IMM && dst->kind == OP_REG) return encode_add_imm_reg(out, dst, src);
             // if (src->kind == OP_IMM && dst->kind == OP_MEM) return encode_add_imm_mem(out, dst, src);
             // if (src->kind == OP_REG && dst->kind == OP_MEM) return encode_add_reg_mem(out, dst, src);

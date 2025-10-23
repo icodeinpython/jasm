@@ -117,15 +117,16 @@ static long parse_number(const char *s) {
 }
 
 /* Operand parsing */
-static Operand *parse_operand(TokenStream *ts);
+static Operand *parse_operand(TokenStream *ts, int insn_size);
 
-static Operand *parse_mem(TokenStream *ts, long disp, bool has_disp) {
+static Operand *parse_mem(TokenStream *ts, long disp, bool has_disp, int size) {
     Operand *op = xmalloc(sizeof(Operand));
     memset(op, 0, sizeof(Operand));
     op->kind = OP_MEM;
     op->mem.scale = 1;
     op->mem.disp = disp;
     op->mem.has_disp = has_disp;
+    op->mem.size = size;
 
     accept(ts, T_LPAREN);
     if (peek(ts)->type == T_REGISTER) {
@@ -148,7 +149,7 @@ static Operand *parse_mem(TokenStream *ts, long disp, bool has_disp) {
     return op;
 }
 
-static Operand *parse_operand(TokenStream *ts) {
+static Operand *parse_operand(TokenStream *ts, int insn_size) {
     Token *t = peek(ts);
     Operand *op = xmalloc(sizeof(Operand));
     memset(op, 0, sizeof(Operand));
@@ -170,13 +171,13 @@ static Operand *parse_operand(TokenStream *ts) {
         long disp = parse_number(t->text);
         next(ts);
         if (peek(ts)->type == T_LPAREN)
-            return parse_mem(ts, disp, true);
+            return parse_mem(ts, disp, true, insn_size);
         op->kind = OP_IMM;
         op->imm = disp;
         return op;
     }
     if (t->type == T_LPAREN)
-        return parse_mem(ts, 0, false);
+        return parse_mem(ts, 0, false, insn_size);
     if (t->type == T_IDENT) {
         op->kind = OP_LABELREF;
         op->labelref = strdup_safe(t->text);
@@ -185,6 +186,20 @@ static Operand *parse_operand(TokenStream *ts) {
     }
     next(ts);
     return op;
+}
+
+static int get_op_size_bits(const char* opcode) {
+    size_t len = strlen(opcode);
+    if (len == 0) return 0;
+
+    char last = opcode[len - 1];
+    switch (last) {
+        case 'b': return 8;
+        case 'w': return 16;
+        case 'l': return 32;
+        case 'q': return 64;
+        default: return 0;
+    } 
 }
 
 /* Instruction, directive, label parsing */
@@ -198,8 +213,10 @@ static Node *parse_instruction(TokenStream *ts, const char *opcode) {
     n->u.instruction.operands = NULL;
     n->u.instruction.noperands = 0;
 
+    int insn_size = get_op_size_bits(opcode);
+
     while (!accept(ts, T_NEWLINE) && peek(ts)->type != T_COMMENT && peek(ts)->type != T_EOF) {
-        Operand *op = parse_operand(ts);
+        Operand *op = parse_operand(ts, insn_size);
         n->u.instruction.operands = realloc(
             n->u.instruction.operands,
             (n->u.instruction.noperands + 1) * sizeof(Operand *)
