@@ -23,3 +23,5 @@ clean:
 
 test: run
 	objdump -D test -b binary -m i386:x86-64
+
+run_test:

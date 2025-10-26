@@ -67,7 +67,15 @@ Program* parse_program(FILE* f);
 void dump_program(Program* p);
 void assemble_program(Program* p, FILE* f);
 
-// Encode helpers
+typedef struct {
+    char *name;
+    uint32_t address;
+} Label;
 
+typedef struct {
+    Label *entries;
+    size_t count;
+    size_t capacity;
+} LabelTable;
 
-size_t encode_instruction(uint8_t *out,Instruction *inst,Program *prog,size_t pos,size_t *offsets);
+size_t encode_instruction(uint8_t *out, Instruction *inst, Program *prog, size_t pos, LabelTable *label_table);
