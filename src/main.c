@@ -1,37 +1,90 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+#include <fcntl.h>
+#include <unistd.h>
+
 #include "jasm.h"
 
-typedef struct {
-    char *inname;
-    char *outname;
-} args_t;
 
 void parse_args(int argc, char* argv[], args_t* args) {
-    if (argc != 3) {
-        printf("Usage: %s <input> <output>\n", argv[0]);
+    if (argc < 3) {
+        printf("Usage: %s <input> -o <output> [-f <binary|elf>]\n", argv[0]);
         exit(1);
     }
-    args->inname = argv[1];
-    args->outname = argv[2];
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-f") == 0) {
+            char *fmt = argv[++i];
+
+            if (strcmp(fmt, "bin") == 0) {
+                args->outformat = OF_BINARY;
+            } else if (strcmp(fmt, "elf") == 0) {
+                args->outformat = OF_ELF;
+            } else {
+                printf("Invalid output format: %s\n", fmt);
+                exit(1);
+            }
+            continue;
+        } else if (strcmp(argv[i], "-h") == 0) {
+            printf("Usage: %s <input> -o <output> [-f <binary|elf>]\n", argv[0]);
+            exit(1);
+        } else if (strcmp(argv[i], "-o") == 0) {
+            args->outname = argv[i + 1];
+            i++;
+        } else {
+            args->inname = argv[i];
+        }
+    }
+
 }
 
 FILE* infile = NULL;
 
-int main(int argc, char *argv[]) {
-    args_t args;
-    parse_args(argc, argv, &args);
+args_t* args;
 
-    infile = fopen(args.inname, "r");
+int main(int argc, char *argv[]) {
+    args = malloc(sizeof(args_t));
+    parse_args(argc, argv, args);
+
+    infile = fopen(args->inname, "r");
     if (!infile) { perror("fopen"); exit(1); }
 
     Program* prog = parse_program(infile);
     dump_program(prog);
     fclose(infile);
 
-    FILE* outfile = fopen(args.outname, "wb");
-    assemble_program(prog, outfile);
-    fclose(outfile);
+
+    struct asm_ret* code = assemble_program(prog);
+
+
+    if (args->outformat == OF_BINARY) {
+        printf("Writing to %s\n", args->outname);
+        int fd = open(args->outname, O_RDWR | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) {
+            perror("open");
+            exit(1);
+        }
+        write(fd, code->code, code->code_size);
+        close(fd);
+        return 0;
+    }
+
+
+    extern LabelTable* G_labels;
+
+    for (size_t i = 0; i < G_labels->count; i++) {
+        printf("%s: %#x\n", G_labels->entries[i].name, G_labels->entries[i].address);
+    }
+
+    for (size_t i = 0; i < G_relocs.count; i++) {
+        printf("%s: %#x\n", G_relocs.entries[i].label->name, G_relocs.entries[i].offset);
+    }
+
+    write_elf64(args->outname, code,  G_labels, &G_relocs);
+
+
 
     return 0;
 }

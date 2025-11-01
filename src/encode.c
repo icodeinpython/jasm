@@ -13,6 +13,17 @@ typedef struct {
     uint8_t code;
 } RegMap;
 
+typedef enum {
+    STAGE1,
+    STAGE2,
+} Stage;
+
+Stage stage = STAGE1;
+
+Section cur_section = SECTION_CODE;
+size_t* code_pos;
+RelocTable G_relocs;
+
 static RegMap regs[] = {
     // 8-bit legacy low
     {"%al",0}, {"%cl",1}, {"%dl",2}, {"%bl",3},
@@ -186,10 +197,11 @@ size_t encode_mov_imm_reg(uint8_t *out, Operand* dst, Operand* src) {
         case 64:
             if (needs_rex) {emit_rex(&out, rex_w, 0, rex_b, 0); size++;}
             if (rm > 7) rm -= 8;
-            *out++ = 0xB8 + rm;
-            *((uint64_t*)out) = (uint64_t)src->imm;
-            out += 8;
-            size += 10;
+            *out++ = 0xC7;
+            *out++ = (0b11 << 6) | (rm & 7);
+            *((uint32_t*)out) = (uint32_t)src->imm;
+            out += 4;
+            size += 6;
             break;
     }
     return size;
@@ -398,7 +410,7 @@ size_t encode_mov_mem_reg(uint8_t *out, Operand* dst, Operand* src) {
     return size;
 }
 
-size_t encode_mov_mem_imm(uint8_t *out, Operand* dst, Operand* src) {
+size_t encode_mov_mem_imm(uint8_t *out, Operand* dst, Operand* src, Label* label) {
     size_t size = 0;
 
     int mem_reg_size = reg_size(dst->mem.base);
@@ -454,6 +466,57 @@ size_t encode_mov_mem_imm(uint8_t *out, Operand* dst, Operand* src) {
         }
 
     return size;
+}
+
+size_t encode_mov_reg_label(uint8_t *out, Operand* dst, Operand* src, LabelTable* label_table) {
+    printf("here\n");
+
+    if (label_table == NULL) {
+        src->imm = 0;
+        return encode_mov_imm_reg(out, dst, src);
+    }
+
+    if (reg_size(dst->reg) != 64) {
+        fprintf(stderr, "Invalid size: %s\n", dst->reg);
+        return 0;
+    }
+
+
+    for (size_t i = 0; i < G_labels->count; i++) {
+        if (!strcmp(G_labels->entries[i].name, src->labelref)) {
+            if (args->outformat == OF_BINARY) {
+                src->imm = G_labels->entries[i].address;
+                return encode_mov_imm_reg(out, dst, src);
+            }
+
+            if (args->outformat == OF_ELF) {
+                Label* l = &G_labels->entries[i];
+
+                printf("Label %s is in section %d, but current section is %d\n", l->name, l->section, cur_section);
+                printf("emitting reloc\n");
+                size_t size = 0;
+                int sz = reg_size(dst->reg);
+                int rm = reg_code(dst->reg);
+                bool rex_w = (sz == 64);
+                bool rex_b = (rm & 8) != 0;
+                bool needs_rex = rex_w || rex_b;
+                if (needs_rex) {emit_rex(&out, rex_w, 0, rex_b, 0); size++;}
+                if (rm > 7) rm -= 8;
+                *out++ = 0xC7;
+                *out++ = (0b11 << 6) | (rm & 7);
+                *((uint32_t*)out) = 0;
+                out += 4;
+                size += 6;
+                printf("size: %#x\n", (uint32_t)size-4 + *(uint32_t*)(code_pos));
+                if (stage == STAGE2)
+                    emit_reloc(&G_relocs, l, (uint32_t)size-4 + *(uint32_t*)(code_pos), SECTION_CODE);
+                return size;
+            }
+        }
+    }
+
+    fprintf(stderr, "Label not found: %s\n", src->labelref);
+    return 0;
 }
 
 size_t encode_add_reg_reg(uint8_t *out, Operand* dst, Operand* src) {
@@ -1722,11 +1785,34 @@ static size_t encode_abs_jmp_mem(uint8_t *out, Operand* dst) {
     return size;
 }
 
+// int
+
+static size_t encode_int(uint8_t *out, Operand* dst) {
+    int imm = dst->imm;
+
+    if (imm == 3) {
+        *out++ = 0xCC;
+        return 1;
+    }
+    
+    if (imm == 1) {
+        *out++ = 0xF1;
+        return 1;
+    }
+
+    if (imm <= 0xFF) {
+        *out++ = 0xCD;
+        *out++ = imm;
+        return 2;
+    }
+    return 0;
+}
+
 // -------------------- Strip suffix --------------------
 static void base_opcode(const char *opc,char *buf){
     size_t len=strlen(opc);
     strcpy(buf,opc);
-    if (!strcmp(opc, "sub"))
+    if (!strcmp(opc, "sub") || !strcmp(opc, "syscall"))
         return;
     if(len>1){
         char last=opc[len-1];
@@ -1746,13 +1832,16 @@ size_t encode_instruction(uint8_t *out, Instruction *inst, __attribute__((unused
 
 
         if (strcmp(opc, "mov") == 0) {
+            printf("mov\n");
             if (src->kind == OP_REG && dst->kind == OP_REG) return encode_mov_reg_reg(out, dst, src);
             if (src->kind == OP_IMM && dst->kind == OP_REG) return encode_mov_imm_reg(out, dst, src);
             if (dst->kind == OP_MEM && src->kind == OP_REG) return encode_mov_reg_mem(out, dst, src);
             if (dst->kind == OP_REG && src->kind == OP_MEM) return encode_mov_mem_reg(out, dst, src);
-            if (dst->kind == OP_MEM && src->kind == OP_IMM) return encode_mov_mem_imm(out, dst, src);
+            if (dst->kind == OP_MEM && src->kind == OP_IMM) return encode_mov_mem_imm(out, dst, src, NULL);
+            if (dst->kind == OP_REG && src->kind == OP_LABELREF) return encode_mov_reg_label(out, dst, src, label_table);
         }
         if (strcmp(opc, "add") == 0) {
+            printf("add\n");
             if (src->kind == OP_REG && dst->kind == OP_REG) return encode_add_reg_reg(out, dst, src);
             if (src->kind == OP_IMM && dst->kind == OP_REG) return encode_add_imm_reg(out, dst, src);
             if (src->kind == OP_IMM && dst->kind == OP_MEM) return encode_add_imm_mem(out, dst, src);
@@ -1760,6 +1849,7 @@ size_t encode_instruction(uint8_t *out, Instruction *inst, __attribute__((unused
             if (src->kind == OP_MEM && dst->kind == OP_REG) return encode_add_mem_reg(out, dst, src);
         }
         if (strcmp(opc, "sub") == 0) {
+            printf("sub\n");
             if (src->kind == OP_REG && dst->kind == OP_REG) return encode_sub_reg_reg(out, dst, src);
             if (src->kind == OP_IMM && dst->kind == OP_REG) return encode_sub_imm_reg(out, dst, src);
             if (src->kind == OP_IMM && dst->kind == OP_MEM) return encode_sub_imm_mem(out, dst, src);
@@ -1767,6 +1857,7 @@ size_t encode_instruction(uint8_t *out, Instruction *inst, __attribute__((unused
             if (src->kind == OP_MEM && dst->kind == OP_REG) return encode_sub_mem_reg(out, dst, src);
         }
         if (strcmp(opc, "cmp") == 0) {
+            printf("cmp\n");
             if (src->kind == OP_REG && dst->kind == OP_REG) return encode_cmp_reg_reg(out, dst, src);
             if (src->kind == OP_IMM && dst->kind == OP_REG) return encode_cmp_imm_reg(out, dst, src);
             if (src->kind == OP_IMM && dst->kind == OP_MEM) return encode_cmp_imm_mem(out, dst, src);
@@ -1830,6 +1921,17 @@ size_t encode_instruction(uint8_t *out, Instruction *inst, __attribute__((unused
         if (!strcmp(opc, "js")) {
             if (op->kind == OP_LABELREF) return encode_rel_jmps(out, op, pos, label_table, 0x88, true);
         }
+        if (!strcmp(opc, "int")) {
+            if (op->kind == OP_IMM) return encode_int(out, op);
+        }
+    }
+
+    if (inst->noperands == 0) {
+        if (!strcmp(opc, "syscall")) {
+            *out++ = 0x0f;
+            *out++ = 0x05;
+            return 2;
+        }
     }
 
 
@@ -1846,13 +1948,41 @@ size_t calculate_instruction_size(Instruction *inst) {
     return len;
 }
 
+size_t encode_directive(uint8_t* out, Directive* directive) {
+    if (!directive) return 0;
+
+    char* name = directive->name;
+
+
+    if (!strcmp(name, ".string")) {
+        if (!directive->args[0]) return 0;
+        size_t len = strlen(directive->args[0]);
+
+        snprintf((char*)out, len+1, directive->args[0]);
+        return len + 1;
+    } if (!strcmp(name, ".data")) {
+        cur_section = SECTION_DATA;
+        return 0;
+    } if (!strcmp(name, ".code")) {
+        cur_section = SECTION_CODE;
+        return 0;
+    }
+
+    return 0;
+}
+
+
 
 // -------------------- Compute instruction offsets --------------------
 static LabelTable* compute_offsets(Program *prog) {
-    LabelTable* label_table = malloc(sizeof(LabelTable));
+    LabelTable* const label_table = malloc(sizeof(LabelTable));
     label_table->entries = NULL;
     label_table->count = 0;
     label_table->capacity = 0;
+
+    size_t code_off = 0;
+    size_t data_off = 0;
+
 
 
     if (!prog) return NULL;
@@ -1863,6 +1993,8 @@ static LabelTable* compute_offsets(Program *prog) {
         Node *n = prog->nodes[i];
         if (n->kind == NODE_INSTRUCTION) {
             off += calculate_instruction_size(&n->u.instruction);
+            if (cur_section == SECTION_CODE) code_off += off;
+            if (cur_section == SECTION_DATA) data_off += off;
         } else if (n->kind == NODE_LABEL) {
             if (label_table->count >= label_table->capacity) {
                 label_table->capacity = label_table->capacity ? label_table->capacity * 2 : 128;
@@ -1871,7 +2003,26 @@ static LabelTable* compute_offsets(Program *prog) {
             }
             Label *l = label_table->entries + label_table->count++;
             l->name = strdup(n->u.label);
-            l->address = off;
+            if (cur_section == SECTION_CODE) l->address = code_off;
+            if (cur_section == SECTION_DATA) l->address = data_off;
+            l->section = cur_section;
+        } else if (n->kind == NODE_DIRECTIVE) {
+            printf("Directive: %s\n", n->u.directive.name);
+            if (strcmp(n->u.directive.name, ".data") == 0) {
+                cur_section = SECTION_DATA;
+            } else if (strcmp(n->u.directive.name, ".code") == 0) {
+                cur_section = SECTION_CODE;
+            } else if (!strcmp(n->u.directive.name, ".org")) {
+                if (!n->u.directive.args[0]) continue;
+                uint32_t addr = strtoul(n->u.directive.args[0], NULL, 0);
+                off = addr;
+            } else {
+                uint8_t buf[32] = {0};
+                size_t len = encode_directive(buf, &n->u.directive);
+                printf("string len = %lu\n", len);
+                if (cur_section == SECTION_CODE) code_off += len;
+                if (cur_section == SECTION_DATA) data_off += len;
+            }
         }
     }
     for (size_t i = 0; i < label_table->count; i++) {
@@ -1879,24 +2030,68 @@ static LabelTable* compute_offsets(Program *prog) {
         printf("label: %s, address: %d\n", l->name, l->address);
     }
 
+    G_labels = label_table;
+
+    stage = STAGE2;
+
     return label_table;
 }
 
+
+LabelTable* G_labels = NULL;
+
+
 // -------------------- Assemble program --------------------
-void assemble_program(Program *prog,FILE *outf){
-    if(!prog) return;
+struct asm_ret* assemble_program(Program *prog) {
+    struct asm_ret* ret = malloc(sizeof(struct asm_ret));
+
+    if(!prog) return NULL;
     LabelTable *label_table = compute_offsets(prog);
 
+    init_reloc_table(&G_relocs);
+
+
+    // FILE* f = fopen("test", "wb");
+    // if (!f) { perror("fopen"); exit(1); }
+
     uint8_t buf[32] = {0};
-    size_t pos = 0;
+    code_pos = malloc(sizeof(size_t));
+
+    size_t* data_pos;
+    data_pos = (args->outformat == OF_BINARY) ? code_pos : malloc(sizeof(size_t));
+
+    *code_pos = *data_pos = 0;
+
+
+    uint8_t* code = malloc(prog->nnodes * 32);
+    uint8_t* data;
+    data = (args->outformat == OF_BINARY) ? code : malloc(prog->nnodes * 32);
+    ret->code = code;
+    ret->data = data;
 
     
     for(size_t i=0;i<prog->nnodes;i++){
         Node *n=prog->nodes[i];
-        if(n->kind!=NODE_INSTRUCTION) continue;
-        size_t len=encode_instruction(buf,&n->u.instruction,prog,pos,label_table);
-        pos += len;
-        if(len==0){ fprintf(stderr,"Skipping unsupported: %s\n",n->u.instruction.opcode); continue;}
-        fwrite(buf,1,len,outf);
+        if(n->kind == NODE_INSTRUCTION) {
+            size_t len=encode_instruction(buf,&n->u.instruction,prog,*code_pos,label_table);
+            if(len==0){ fprintf(stderr,"Skipping unsupported: %s\n",n->u.instruction.opcode); continue;}
+            // fwrite(buf, 1, len, f);
+            memcpy(code + *code_pos, buf, len);
+            *code_pos += len;
+        } else if (n->kind == NODE_DIRECTIVE) {
+            uint8_t buf[32] = {0};
+            size_t len = encode_directive(buf, &n->u.directive);
+            printf("dirlen: %lu\n", len);
+            printf("data_pos: %lu\n", *data_pos);
+
+            memcpy(data + *data_pos, buf, len);
+            *data_pos += len;
+        } 
     }
+
+    // fclose(f);
+
+    ret->code_size = (*code_pos);
+    ret->data_size = (*data_pos);
+    return ret;
 }

@@ -1,3 +1,6 @@
+#define _XOPEN_SOURCE 500
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,7 +10,7 @@
 
 /* ---------- Helpers ---------- */
 
-static char *strdup_safe(const char *s) {
+char *strdup_safe(const char *s) {
     if (!s) return NULL;
     char *r = malloc(strlen(s) + 1);
     if (!r) { perror("malloc"); exit(1); }
@@ -25,7 +28,7 @@ static void *xmalloc(size_t n) {
 
 typedef enum {
     T_EOF, T_IDENT, T_DIRECTIVE, T_REGISTER, T_NUMBER, T_IMM_PREFIX,
-    T_LPAREN, T_RPAREN, T_COMMA, T_COLON, T_NEWLINE, T_COMMENT, T_OTHER
+    T_LPAREN, T_RPAREN, T_COMMA, T_COLON, T_NEWLINE, T_COMMENT, T_OTHER, T_STRING
 } TokenType;
 
 typedef struct {
@@ -89,6 +92,30 @@ static void lex_file(TokenStream *ts, FILE *f) {
             } else if (c == '(') { add_tok(ts, T_LPAREN, &c, 1); i++; }
             else if (c == ')') { add_tok(ts, T_RPAREN, &c, 1); i++; }
             else if (c == ',') { add_tok(ts, T_COMMA, &c, 1); i++; }
+            else if (c == '"') {
+                char buf[1024] = {0};
+                size_t b = 0;
+                i++;
+                while (line[i] && line[i] != '"') {
+                    if (line[i] == '\\' && line[i + 1]) {
+                        i++;
+                        switch (line[i]) {
+                            case 'n': buf[b++] = '\n'; break;
+                            case 't': buf[b++] = '\t'; break;
+                            case 'r': buf[b++] = '\r'; break;
+                            case '"': buf[b++] = '"'; break;
+                            case '\\': buf[b++] = '\\'; break;
+                            default: buf[b++] = line[i]; break;
+                        }
+                    } else {
+                        buf[b++] = line[i];
+                    }
+                    i++;
+                }
+                buf[b] = '\0';
+                if (line[i] == '"') i++;
+                add_tok(ts, T_STRING, buf, strlen(buf));
+            }
             else { add_tok(ts, T_OTHER, &c, 1); i++; }
         }
     }
@@ -236,7 +263,7 @@ static Node *parse_directive(TokenStream *ts, const char *name) {
     n->u.directive.nargs = 0;
 
     while (!accept(ts, T_NEWLINE) && peek(ts)->type != T_COMMENT && peek(ts)->type != T_EOF) {
-        if (peek(ts)->type == T_IDENT || peek(ts)->type == T_NUMBER) {
+        if (peek(ts)->type == T_STRING || peek(ts)->type == T_IDENT || peek(ts)->type == T_NUMBER) {
             n->u.directive.args = realloc(
                 n->u.directive.args,
                 (n->u.directive.nargs + 1) * sizeof(char *)
@@ -275,7 +302,6 @@ Program *parse_program(FILE *f) {
             ts.i += 2; // skip ident + colon
         } else if (t->type == T_DIRECTIVE) {
             node = parse_directive(&ts, t->text);
-            next(&ts);
         } else if (t->type == T_IDENT) {
             next(&ts);
             node = parse_instruction(&ts, t->text);
@@ -298,9 +324,11 @@ void dump_program(Program *p) {
             printf("Label: %s\n", n->u.label);
             break;
         case NODE_DIRECTIVE:
-            printf("Directive: %s", n->u.directive.name);
-            for (size_t j = 0; j < n->u.directive.nargs; j++)
-                printf(" %s", n->u.directive.args[j]);
+            printf("Directive: %s\n", n->u.directive.name);
+            for (size_t j = 0; j < n->u.directive.nargs; j++) {
+                const char *arg = n->u.directive.args[j];
+                printf("%s", arg);
+            }
             printf("\n");
             break;
         case NODE_INSTRUCTION:
@@ -325,4 +353,8 @@ void dump_program(Program *p) {
             break;
         }
     }
+}
+
+void print_operand(Program* prog) {
+    printf("Operand: %s", prog->nodes[0]->u.directive.args[0]);
 }
